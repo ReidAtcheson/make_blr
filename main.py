@@ -4,13 +4,16 @@ import scipy.sparse.linalg as spla
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import time
+import pickle
 
 
 from jax.experimental import sparse
+from jax import random
 import jax.numpy as jnp
 import jax.nn as jnn
 from jax import grad, jit, vmap
-from jax.lax import fori_loop
+import optax
 
 @jit
 def update(params,updates,step):
@@ -43,6 +46,7 @@ def make_block_precon(A,blocksize):
 #in each block and full matrices
 #on diagonal 
 def make_blr(A,blocksize,d=1):
+    key=random.PRNGKey(0)
     A=sp.lil_matrix(A)
     m,_=A.shape
     blocks={}
@@ -55,43 +59,78 @@ def make_blr(A,blocksize,d=1):
             else:
                 ki=min(i+blocksize,m)-i
                 kj=min(j+blocksize,m)-j
-                blocks[i][j]=(jnp.zeros((ki,d)),jnp.zeros((d,kj)))
+                keys=random.split(key,3)
+                blocks[i][j]=(random.normal(keys[0],(ki,d)),random.normal(keys[1],(d,kj)))
+                key=keys[-1]
     return blocks
 
 def eval_blr(blocks,m,blocksize,x):
     ids=list(range(blocksize,m,blocksize))
     xs=jnp.vsplit(x,ids)
     out=[]
-    for li,i in enumerate(range(0,m,blocksize)):
-        x=xs[li]
+    for i in range(0,m,blocksize):
         def body(j):
             if i==j:
                 D=blocks[i][j]
-                return D@x
+                return D@xs[j//blocksize]
             else:
                 U,Vt=blocks[i][j]
-                return U@(Vt@x)
+                return U@(Vt@xs[j//blocksize])
         col = [body(j) for j in range(0,m,blocksize)]
         sumop=[jnp.eye(u.shape[0]) for u in col]
         out.append(jnp.hstack(sumop)@jnp.vstack(col))
     return jnp.vstack(out)
 
 
-#def loss(params,
+def loss(params,m,blocksize,Ax,x):
+    blrx=eval_blr(params,m,blocksize,Ax)
+    return jnp.sum( (blrx-x)*(blrx-x) )
+
 
 
 seed=23498732
 rng=np.random.default_rng(seed)
-m=512
+m=32768
 diag=4
-blocksize=32
+blocksize=512
+batchsize=8
+nepochs=100
+lr=1e-3
+opt = optax.adam(lr)
+
+
 
 
 #Plain preconditioned richardson
 A=make_banded_matrix(m,diag,[1,2,3,10,40,100],rng)
 #Ab=make_block_precon(A,blocksize)
 #luAb=spla.splu(sp.csc_matrix(Ab))
-b=np.ones((m,3))
-
+#b=np.ones((m,3))
+#Ab=A@b
 blr=make_blr(A,blocksize)
-eval_blr(blr,m,blocksize,b)
+
+r=range(0,m,blocksize)
+
+losses=[]
+opt_state = opt.init(blr)
+
+
+for it in range(nepochs):
+    print("NEW SUBITERATIONS")
+    x=rng.normal(size=(m,batchsize))
+    Ax=A@x
+    for i in range(0,100):
+        start=time.time()
+        g = grad(loss)(blr,m,blocksize,Ax,x)
+        updates,opt_state = opt.update(g,opt_state)
+        blr = optax.apply_updates(blr,updates)
+        err=loss(blr,m,blocksize,Ax,x)
+        stop=time.time()
+
+        print(f"it = {it},  elapsed = {stop-start : .4f}, loss = {err}")
+        losses.append(err)
+
+
+f=open("blr.dat","wb")
+pickle.dump(blr,f)
+
