@@ -10,6 +10,7 @@ from jax.experimental import sparse
 import jax.numpy as jnp
 import jax.nn as jnn
 from jax import grad, jit, vmap
+from jax.lax import fori_loop
 
 @jit
 def update(params,updates,step):
@@ -57,6 +58,24 @@ def make_blr(A,blocksize,d=1):
                 blocks[i][j]=(jnp.zeros((ki,d)),jnp.zeros((d,kj)))
     return blocks
 
+def eval_blr(blocks,m,blocksize,x):
+    ids=list(range(blocksize,m,blocksize))
+    xs=jnp.vsplit(x,ids)
+    out=[]
+    for li,i in enumerate(range(0,m,blocksize)):
+        x=xs[li]
+        def body(j):
+            if i==j:
+                D=blocks[i][j]
+                return D@x
+            else:
+                U,Vt=blocks[i][j]
+                return U@(Vt@x)
+        col = [body(j) for j in range(0,m,blocksize)]
+        sumop=[jnp.eye(u.shape[1]) for u in col]
+        out.append(jnp.vstack(col)@jnp.hstack(sumop))
+    return jnp.vstack(out)
+
 
 seed=23498732
 rng=np.random.default_rng(seed)
@@ -69,6 +88,7 @@ blocksize=32
 A=make_banded_matrix(m,diag,[1,2,3,10,40,100],rng)
 #Ab=make_block_precon(A,blocksize)
 #luAb=spla.splu(sp.csc_matrix(Ab))
-b=np.ones(m)
+b=np.ones((m,3))
 
 blr=make_blr(A,blocksize)
+eval_blr(blr,m,blocksize,b)
