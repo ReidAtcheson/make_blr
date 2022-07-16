@@ -72,9 +72,12 @@ def eval_blr(blocks,m,blocksize,x):
                 U,Vt=blocks[i][j]
                 return U@(Vt@x)
         col = [body(j) for j in range(0,m,blocksize)]
-        sumop=[jnp.eye(u.shape[1]) for u in col]
-        out.append(jnp.vstack(col)@jnp.hstack(sumop))
+        sumop=[jnp.eye(u.shape[0]) for u in col]
+        out.append(jnp.hstack(sumop)@jnp.vstack(col))
     return jnp.vstack(out)
+
+
+#def loss(params,
 
 
 seed=23498732
