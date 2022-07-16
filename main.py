@@ -13,6 +13,7 @@ from jax import random
 import jax.numpy as jnp
 import jax.nn as jnn
 from jax import grad, jit, vmap
+from functools import partial
 import optax
 
 @jit
@@ -64,6 +65,7 @@ def make_blr(A,blocksize,d=1):
                 key=keys[-1]
     return blocks
 
+@partial(jit, static_argnums=[1,2])
 def eval_blr(blocks,m,blocksize,x):
     ids=list(range(blocksize,m,blocksize))
     xs=jnp.vsplit(x,ids)
@@ -81,18 +83,18 @@ def eval_blr(blocks,m,blocksize,x):
         out.append(jnp.hstack(sumop)@jnp.vstack(col))
     return jnp.vstack(out)
 
-
+@partial(jit, static_argnums=[1,2])
 def loss(params,m,blocksize,Ax,x):
     blrx=eval_blr(params,m,blocksize,Ax)
-    return jnp.sum( (blrx-x)*(blrx-x) )
+    return jnp.sum( (blrx-x)*(blrx-x) )/m
 
 
 
 seed=23498732
 rng=np.random.default_rng(seed)
-m=32768
+m=512
 diag=4
-blocksize=512
+blocksize=32
 batchsize=8
 nepochs=100
 lr=1e-3
