@@ -151,16 +151,27 @@ b=np.ones(m)
 
 
 
+errs=[]
 it=0
-def callback(rk):
+def callback(xk):
     global it
-    print(f"it = {it}, res = {rk}")
+    err=np.linalg.norm(b-A@xk)
+    print(f"it = {it}, res = {err}")
+    errs.append(err)
+
     it=it+1
 
 
+
+maxiter=500
 print("STANDARD BLOCK JACOBI")
-spla.gmres(A,b,callback=callback,restart=1,M=spla.LinearOperator((m,m),matvec=luAb.solve),maxiter=100)
+spla.gmres(A,b,callback=callback,restart=1,M=spla.LinearOperator((m,m),matvec=luAb.solve),maxiter=maxiter,callback_type="x")
+
+plt.semilogy(errs)
+plt.xlabel("GMRES Iteration")
+plt.ylabel("Residual")
 it=0
+errs=[]
 
 
 
@@ -170,4 +181,9 @@ def blr_precon(x):
     return x.reshape((m,))
 
 print("LEARNED BLR PRECONDITIONER")
-spla.gmres(A,b,callback=callback,restart=1,M=spla.LinearOperator((m,m),matvec=blr_precon),maxiter=100)
+spla.gmres(A,b,callback=callback,restart=1,M=spla.LinearOperator((m,m),matvec=blr_precon),maxiter=maxiter,callback_type="x")
+
+plt.semilogy(errs)
+plt.legend(["Block Jacobi","Learned BLR"])
+plt.title("Comparing Block Jacobi to Block-Low-Rank with same block size")
+plt.savefig("precon_compare.svg")
