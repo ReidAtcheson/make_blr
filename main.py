@@ -8,6 +8,7 @@ import time
 import pickle
 
 
+import jax
 from jax.experimental import sparse
 from jax import random
 import jax.numpy as jnp
@@ -44,23 +45,20 @@ def make_block_precon(A,blocksize):
     return sp.block_diag(blocks)
 
 #Create a preconditioner by blocking up
-#range and putting a rank-`d`-update
-#in each block and full matrices
-#on diagonal.
-#Each block has the form:
-#(is_diagonal,params)
-#where is_diagonal indicates a diagonal block
 def make_blr(A,blocksize,d=1):
     key=random.PRNGKey(0)
     A=sp.lil_matrix(A)
     m,_=A.shape
+    assert( m%blocksize==0 )
     blockVs=[]
     blockUs=[]
     Ds=[]
     for i in range(0,m,blocksize):
+        Us=[]
+        Vs=[]
         ki=min(i+blocksize,m)-i
         keys=random.split(key,2)
-        D.append(random.normal(keys[0],(ki,ki)))
+        Ds.append(random.normal(keys[0],(ki,ki)))
         key=keys[-1]
         for j in range(0,m,blocksize):
             kj=min(j+blocksize,m)-j
@@ -68,45 +66,49 @@ def make_blr(A,blocksize,d=1):
             Vs.append(random.normal(keys[0],(d,kj)))
             Us.append(random.normal(keys[1],(ki,d)))
             key=keys[-1]
+        blockVs.append(jnp.asarray(Vs))
+        blockUs.append(jnp.asarray(Us))
 
-
-        for j,_ in enumerate(range(0,m,blocksize)):
-            if i==j:
-                ids=list(range(i,min(i+blocksize,m)))
-                blocks[i].append((True,jnp.array(np.linalg.inv(A[np.ix_(ids,ids)].toarray()))))
-            else:
-                ki=min(i+blocksize,m)-i
-                kj=min(j+blocksize,m)-j
-                keys=random.split(key,3)
-                blocks[i].append((False,(random.normal(keys[0],(ki,d)),random.normal(keys[1],(d,kj)))))
-                key=keys[-1]
-    return blocks
-
+    return jnp.asarray(blockUs),jnp.asarray(blockVs),jnp.asarray(Ds)
 
 @partial(jit, static_argnums=[1,2])
 def eval_blr(blocks,m,blocksize,x):
-    nblocks=len(blocks)
-    ids=list(range(blocksize,m,blocksize))
-    xs=jnp.vsplit(x,ids)
+    m,ncols=x.shape
+    nblocks=m//blocksize
+    Us,Vs,Ds=blocks
+    xr = x.reshape((nblocks,blocksize,ncols))
+    out=[]
+    for i in range(0,nblocks):
+        Vx = jax.lax.dot_general(Vs[i],xr,dimension_numbers=(
+            ((2,), (1,)),
+            ((0,), (0,))
+            ))
+        UVx = jax.lax.dot_general(Us[i],Vx,dimension_numbers=(
+            ((0,), (0,)),
+            ((2), (1))
+            ))
+        out.append(UVx)
 
-    def row(brow):
+    y=jnp.asarray(out).reshape((nblocks,blocksize,ncols))
+    #Ds.shape = (16, 32, 32)
+    #y.shape = (16, 32, 8)
 
-        def while_cond(
-
-
-
-
-
-    return jnp.concatenate([row(brow) for brow in blocks],axis=0)
+    #print(Ds.shape)
+    #print(y.shape)
+    z=jax.lax.dot_general(Ds,y,dimension_numbers=(
+            ((2,), (1,)),
+            ((0,), (0,))
+            ))
+    return z.reshape((m,ncols))
 
 
 
 
 @partial(jit, static_argnums=[1,2])
-def loss(params,m,blocksize,Axs,xs):
-    blrxs=eval_blr(params,m,blocksize,Axs)
-    return jnp.sum([jnp.sum((blrx-x)*(blrx-x)) for blrx,x in zip(blrxs,xs)])
-
+def loss(params,m,blocksize,Ax,x):
+    blrx=eval_blr(params,m,blocksize,Ax)
+    sqrtm=jnp.sqrt(m)
+    return jnp.sum(((blrx-Ax)/sqrtm)*((blrx-Ax)/sqrtm))
 
 
 
@@ -141,16 +143,12 @@ for it in range(nepochs):
     print("NEW SUBITERATIONS")
     x=rng.normal(size=(m,batchsize))
     Ax=A@x
-    ids=list(range(blocksize,m,blocksize))
-    xs=jnp.vsplit(x,ids)
-    Axs=jnp.vsplit(Ax,ids)
-
     for i in range(0,100):
         start=time.time()
-        g = grad(loss)(blr,m,blocksize,Axs,xs)
+        g = grad(loss)(blr,m,blocksize,Ax,x)
         updates,opt_state = opt.update(g,opt_state)
         blr = optax.apply_updates(blr,updates)
-        err=loss(blr,m,blocksize,Axs,xs)
+        err=loss(blr,m,blocksize,Ax,x)
         stop=time.time()
 
         print(f"it = {it},  elapsed = {stop-start : .4f}, loss = {err}")
