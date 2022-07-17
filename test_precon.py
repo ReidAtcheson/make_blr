@@ -137,63 +137,37 @@ def loss(params,m,blocksize,Ax,x):
 
 
 
-seed=23498732
-rng=np.random.default_rng(seed)
+
+f=open("blr.dat","rb")
+blr=pickle.load(f)
 m=2048
-diag=3
 blocksize=128
-batchsize=16
-nepochs=500
-inner=10
-lr=1e-3
-opt = optax.adam(lr)
 
-
-
-
-A=make_banded_matrix(m,diag,[1,2,3,10,40,100],rng)
+f=open("A.dat","rb")
+A=pickle.load(f)
 Ab=make_block_precon(A,blocksize)
 luAb=spla.splu(sp.csc_matrix(Ab))
-b=np.ones((m,3))
-#Ab=A@b
-blr=make_blr(A,blocksize)
-
-r=range(0,m,blocksize)
-
-losses=[]
-opt_state = opt.init(blr)
-
-print(luAb.solve(b))
-print(eval_blr(blr,m,blocksize,b))
+b=np.ones(m)
 
 
-for it in range(nepochs):
-    print("NEW SUBITERATIONS")
-    x=rng.normal(size=(m,batchsize))
-    #x=rng.normal(size=(m,batchsize))
-    #x[:,0]=np.ones(m)
-    Ax=A@x
-    T=luAb.solve(Ax)
-    for i in range(0,inner):
-        start=time.time()
-        err=loss(blr,m,blocksize,Ax,x)
-        g = grad(loss)(blr,m,blocksize,Ax,x)
-        updates,opt_state = opt.update(g,opt_state)
-        blr = optax.apply_updates(blr,updates)
-        stop=time.time()
 
-        if i==0:
-            losses.append(err)
-        print(f"it = {it},     elapsed = {stop-start : .4f},    loss = {err : 4f},      last = {losses[-1]},   reference = {np.sum((T-x)*(T-x)/m)}")
+it=0
+def callback(rk):
+    global it
+    print(f"it = {it}, res = {rk}")
+    it=it+1
 
-plt.semilogy(losses)
-plt.title("Loss at start of new epoch")
-plt.xlabel("epochs")
-plt.ylabel("loss")
-plt.savefig("loss.svg")
 
-f=open("blr.dat","wb")
-pickle.dump(blr,f)
-f=open("A.dat","wb")
-pickle.dump(A,f)
+print("STANDARD BLOCK JACOBI")
+spla.gmres(A,b,callback=callback,restart=1,M=spla.LinearOperator((m,m),matvec=luAb.solve),maxiter=100)
+it=0
 
+
+
+def blr_precon(x):
+    x=x.reshape((m,1))
+    x=eval_blr(blr,m,blocksize,x)
+    return x.reshape((m,))
+
+print("LEARNED BLR PRECONDITIONER")
+spla.gmres(A,b,callback=callback,restart=1,M=spla.LinearOperator((m,m),matvec=blr_precon),maxiter=100)
