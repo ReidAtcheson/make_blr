@@ -8,13 +8,12 @@ import time
 import pickle
 
 
-import jax
 from jax.experimental import sparse
 from jax import random
-import jax.numpy as jnp
 import jax.nn as jnn
+import jax
 from jax import grad, jit, vmap
-from jax.lax import fori_loop
+import jax.numpy as jnp
 from functools import partial
 import optax
 
@@ -135,16 +134,25 @@ def loss(params,m,blocksize,Ax,x):
     sqrtm=jnp.sqrt(m)
     return jnp.sum(((blrx-Ax)/sqrtm)*((blrx-Ax)/sqrtm))
 
+@partial(jit, static_argnums=[1,2])
+def loss2(UV,Ds,m,blocksize,Ax,x):
+    U,V=UV
+    blrx=eval_blr((U,V,Ds),m,blocksize,Ax)
+    sqrtm=jnp.sqrt(m)
+    return jnp.sum(((blrx-Ax)/sqrtm)*((blrx-Ax)/sqrtm))
+
+
+
 
 
 seed=23498732
 rng=np.random.default_rng(seed)
 m=2048
-diag=3
+diag=3.0
 blocksize=128
-batchsize=16
-nepochs=500
-inner=10
+batchsize=64
+nepochs=2000
+inner=1
 lr=1e-3
 opt = optax.adam(lr)
 
@@ -170,10 +178,8 @@ print(eval_blr(blr,m,blocksize,b))
 for it in range(nepochs):
     print("NEW SUBITERATIONS")
     x=rng.normal(size=(m,batchsize))
-    #x=rng.normal(size=(m,batchsize))
-    #x[:,0]=np.ones(m)
     Ax=A@x
-    T=luAb.solve(Ax)
+    T=luAb.solve(np.ones(m)).reshape((m,1))
     for i in range(0,inner):
         start=time.time()
         err=loss(blr,m,blocksize,Ax,x)
@@ -182,9 +188,15 @@ for it in range(nepochs):
         blr = optax.apply_updates(blr,updates)
         stop=time.time()
 
+        valid_err = loss(blr,m,blocksize,(A@np.ones(m)).reshape((m,1)),np.ones(m).reshape((m,1)))
+
         if i==0:
             losses.append(err)
-        print(f"it = {it},     elapsed = {stop-start : .4f},    loss = {err : 4f},      last = {losses[-1]},   reference = {np.sum((T-x)*(T-x)/m)}")
+        print(f"it = {it},     elapsed = {stop-start : .4f},    loss = {err : 4f},      valid = {valid_err},   reference = {np.sum((T-x)*(T-x)/m)}")
+    #if len(losses)>250:
+    #    inner=100
+
+
 
 plt.semilogy(losses)
 plt.title("Loss at start of new epoch")

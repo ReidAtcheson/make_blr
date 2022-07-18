@@ -23,7 +23,7 @@ def update(params,updates,step):
     return [(p0+step*u0,p1+step*u1) for (p0,p1),(u0,u1) in zip(params,updates)]
 
 #Make a random sparse-banded matrix 
-#with bands in `bands1
+#with bands in `bands1/
 #its diagonal shifted by `diag`
 def make_banded_matrix(m,diag,bands,rng):
     subdiags=[rng.uniform(-1,1,m) for _ in bands] + [rng.uniform(-1,1,m) + diag] + [rng.uniform(-1,1,m) for _ in bands]
@@ -140,11 +140,11 @@ def loss(params,m,blocksize,Ax,x):
 
 f=open("blr.dat","rb")
 blr=pickle.load(f)
-m=2048
-blocksize=128
 
 f=open("A.dat","rb")
 A=pickle.load(f)
+blocksize=128
+m,_=A.shape
 Ab=make_block_precon(A,blocksize)
 luAb=spla.splu(sp.csc_matrix(Ab))
 b=np.ones(m)
@@ -167,7 +167,7 @@ maxiter=500
 print("STANDARD BLOCK JACOBI")
 spla.gmres(A,b,callback=callback,restart=1,M=spla.LinearOperator((m,m),matvec=luAb.solve),maxiter=maxiter,callback_type="x")
 
-plt.semilogy(errs)
+plt.semilogy(errs,linewidth=2)
 plt.xlabel("GMRES Iteration")
 plt.ylabel("Residual")
 it=0
@@ -183,7 +183,7 @@ def blr_precon(x):
 print("LEARNED BLR PRECONDITIONER")
 spla.gmres(A,b,callback=callback,restart=1,M=spla.LinearOperator((m,m),matvec=blr_precon),maxiter=maxiter,callback_type="x")
 
-plt.semilogy(errs)
+plt.semilogy(errs,linewidth=2)
 plt.legend(["Block Jacobi","Learned BLR"])
 plt.title("Comparing Block Jacobi to Block-Low-Rank with same block size")
 plt.savefig("precon_compare.svg")
