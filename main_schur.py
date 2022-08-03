@@ -13,6 +13,7 @@ from jax.experimental import sparse
 from jax import random
 import jax.nn as jnn
 import jax
+import jax.scipy.linalg as jla
 from jax import grad, jit, vmap
 import jax.numpy as jnp
 from functools import partial
@@ -24,23 +25,6 @@ config.update("jax_enable_x64", True)
 @jit
 def update(params,updates,step):
     return [(p0+step*u0,p1+step*u1) for (p0,p1),(u0,u1) in zip(params,updates)]
-
-def arnoldi(A,v,k):
-    norm=np.linalg.norm
-    dot=np.dot
-    m,_=A.shape
-    V=np.zeros((m,k+1))
-    H=np.zeros((k+1,k))
-    V[:,0]=v/norm(v)
-    for j in range(0,k):
-        w=A@V[:,j]
-        for i in range(0,j+1):
-            H[i,j]=dot(w,V[:,i])
-            w=w-H[i,j]*V[:,i]
-        H[j+1,j]=norm(w)
-        V[:,j+1]=w/H[j+1,j]
-    return H,V
-
 
 #Make a random sparse-banded matrix 
 #with bands in `bands1
@@ -88,8 +72,8 @@ def make_blr_random(A,blocksize,d=1):
             key=keys[-1]
         blockVs.append(jnp.asarray(Vs))
         blockUs.append(jnp.asarray(Us))
+    return jnp.asarray(blockUs,dtype=np.float64),jnp.asarray(blockVs,dtype=np.float64),jnp.asarray(Ds,dtype=np.float64)
 
-    return jnp.asarray(blockUs),jnp.asarray(blockVs),jnp.asarray(Ds)
 
 #Create a preconditioner by blocking up
 def make_blr(A,blocksize,d=1):
@@ -114,6 +98,32 @@ def make_blr(A,blocksize,d=1):
         blockUs.append(jnp.asarray(Us))
 
     return jnp.asarray(blockUs,dtype=np.float64),jnp.asarray(blockVs,dtype=np.float64),jnp.asarray(Ds,dtype=np.float64)
+
+#Create a preconditioner by blocking up starting with identity
+def make_blr_id(A,blocksize,d=1):
+    key=random.PRNGKey(0)
+    A=sp.lil_matrix(A)
+    m,_=A.shape
+    assert( m%blocksize==0 )
+    blockVs=[]
+    blockUs=[]
+    Ds=[]
+    for i in range(0,m,blocksize):
+        Us=[]
+        Vs=[]
+        ki=min(i+blocksize,m)-i
+        ids=list(range(i,i+ki))
+        Ds.append(jnp.eye(len(ids)))
+        for j in range(0,m,blocksize):
+            kj=min(j+blocksize,m)-j
+            Vs.append(jnp.zeros((d,kj)))
+            Us.append(jnp.zeros((ki,d)))
+        blockVs.append(jnp.asarray(Vs))
+        blockUs.append(jnp.asarray(Us))
+
+    return jnp.asarray(blockUs,dtype=np.float64),jnp.asarray(blockVs,dtype=np.float64),jnp.asarray(Ds,dtype=np.float64)
+
+
 
 
 @partial(jit, static_argnums=[1,2])
@@ -144,24 +154,28 @@ def eval_blr(blocks,m,blocksize,x):
 
 
 @partial(jit, static_argnums=[1,2])
-def loss(params,m,blocksize,Ax,x):
-    blrx=eval_blr(params,m,blocksize,Ax)
-    sqrtm=jnp.sqrt(m)
-    return jnp.sum(((blrx-x)/sqrtm)*((blrx-x)/sqrtm))
+def loss(params,m,blocksize,A):
+    blrA=eval_blr(params,m,blocksize,A)
+    T,Z = jla.schur(blrA)
+    I=jnp.eye(T.shape[0])
+    return jnp.dot(T.flatten()-I.flatten(),T.flatten()-I.flatten())
+
 
 
 
 
 
 seed=23498732
+plot_eigs=True
 rng=np.random.default_rng(seed)
 m=512
 diag=2.0
 blocksize=32
-batchsize=64
-nepochs=40000
-inner=1
-lr=1e-5
+batchsize=m
+nepochs=1
+inner=2000
+lr=1e-3
+k=1
 d=1
 #opt = optax.adam(lr)
 opt = optax.sgd(lr)
@@ -175,7 +189,17 @@ luAb=spla.splu(sp.csc_matrix(Ab))
 b=np.ones((m,3))
 #Ab=A@b
 #blr=make_blr_random(A,blocksize,d=d)
-blr=make_blr(A,blocksize,d=d)
+#blr=make_blr(A,blocksize,d=d)
+blr=make_blr_id(A,blocksize,d=d)
+
+Ah=luAb.solve(A.toarray())
+T,Z = jla.schur(Ah)
+I=jnp.eye(T.shape[0])
+valid=jnp.dot(T.flatten()-I.flatten(),T.flatten()-I.flatten())
+
+
+
+
 
 
 #open from checkpoint
@@ -195,30 +219,37 @@ print(eval_blr(blr,m,blocksize,b))
 
 for it in range(nepochs):
     print("NEW SUBITERATIONS")
-    #x=rng.normal(size=(m,batchsize))
-    x=rng.uniform(size=(m,batchsize))
-
-    #x=rng.normal(size=m)
-    #_,x=arnoldi(A,x,batchsize)
-    #x,_=la.qr(x,mode="economic")
-    Ax=A@x
-    T=luAb.solve(A@np.ones(m))
-    ref = np.dot(T.flatten()-np.ones(m),T.flatten()-np.ones(m))/m
+    Afull=A.toarray()
+    eigA = la.eigvals(Afull)
 
     for i in range(0,inner):
+        if plot_eigs:
+            minx=min(np.real(eigA))
+            maxx=max(np.real(eigA))
+            miny=min(np.imag(eigA))
+            maxy=max(np.imag(eigA))
+            plt.close()
+            blrA = eval_blr(blr,m,blocksize,Afull)
+            eigbA = la.eigvals(blrA)
+            plt.scatter(np.real(eigbA),np.imag(eigbA))
+            ax = plt.gca()
+            ax.set_xlim([minx,maxx])
+            ax.set_ylim([miny,maxy])
+            istr=str(i).zfill(5)
+            plt.savefig(f"eigs/{istr}.png")
+
+
         start=time.time()
-        err=loss(blr,m,blocksize,Ax,x)
-        g = grad(loss)(blr,m,blocksize,Ax,x)
+        err=loss(blr,m,blocksize,Afull)
+        g = grad(loss)(blr,m,blocksize,Afull)
         updates,opt_state = opt.update(g,opt_state)
         blr = optax.apply_updates(blr,updates)
         stop=time.time()
 
-        valid_err = loss(blr,m,blocksize,(A@np.ones(m)).reshape((m,1)),np.ones(m).reshape((m,1)))
 
         if i==0:
             losses.append(err)
-            valids.append(valid_err)
-        print(f"it = {it},     elapsed = {stop-start : .4f},    loss = {err : 4f},      valid = {valid_err},   reference = {ref}")
+        print(f"it = {i},     elapsed = {stop-start : .4f},    loss = {err : 4f},    valid = {valid : 4f}")
 #    if len(losses)>5000:
 #        inner=20
 
@@ -229,13 +260,6 @@ plt.title("Loss at start of new epoch")
 plt.xlabel("epochs")
 plt.ylabel("loss")
 plt.savefig("loss.svg")
-plt.close()
-
-plt.semilogy(valids)
-plt.title("Validation loss at start of new epoch")
-plt.xlabel("epochs")
-plt.ylabel("validation loss")
-plt.savefig("valid.svg")
 plt.close()
 
 

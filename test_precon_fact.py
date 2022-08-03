@@ -1,7 +1,6 @@
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-import scipy.linalg as la
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -18,8 +17,6 @@ from jax import grad, jit, vmap
 from jax.lax import fori_loop
 from functools import partial
 import optax
-from jax.config import config
-config.update("jax_enable_x64", True)
 
 @jit
 def update(params,updates,step):
@@ -143,7 +140,6 @@ def loss(params,m,blocksize,Ax,x):
 
 f=open("blr.dat","rb")
 blr=pickle.load(f)
-print(blr[0].dtype)
 
 
 f=open("A.dat","rb")
@@ -175,10 +171,11 @@ print(f"norm(Ib-I) = {np.linalg.norm(Ib.flatten()-np.eye(m).flatten())}")
 
 seed=23084
 rng=np.random.default_rng(seed)
-restart=1
+restart=10
 maxiter=50
 print("STANDARD BLOCK JACOBI")
-spla.gmres(A,b,callback=callback,restart=restart,M=spla.LinearOperator((m,m),matvec=luAb.solve),maxiter=maxiter,callback_type="x")
+spla.gmres(spla.LinearOperator((m,m),matvec=lambda x : luAb.solve(A@x)),
+    luAb.solve(b),callback=callback,restart=restart,maxiter=maxiter,callback_type="x")
 
 plt.semilogy(errs,linewidth=2)
 plt.xlabel("GMRES Iteration")
@@ -192,12 +189,6 @@ def blr_precon(x):
     x=eval_blr(blr,m,blocksize,x)
     return x.reshape((m,))
 
-def blr_precon_full(x):
-    x=eval_blr(blr,m,blocksize,x)
-    return x
-
-
-
 
 x0=rng.uniform(-1,1,size=m)
 x1=rng.uniform(-1,1,size=m)
@@ -210,33 +201,11 @@ print(np.linalg.norm(blr_precon(alpha*x0 + beta*x1) - alpha*blr_precon(x0) - bet
 
 
 print("LEARNED BLR PRECONDITIONER")
-spla.gmres(A,b,callback=callback,restart=restart,M=spla.LinearOperator((m,m),matvec=blr_precon),maxiter=maxiter,callback_type="x")
+spla.gmres(spla.LinearOperator((m,m),lambda x : blr_precon(luAb.solve(A@x))),
+        blr_precon(luAb.solve(b)),
+        callback=callback,restart=restart,maxiter=maxiter,callback_type="x")
 
 plt.semilogy(errs,linewidth=2)
 plt.legend(["Block Jacobi","Learned BLR"])
 plt.title("Comparing Block Jacobi to Block-Low-Rank with same block size")
 plt.savefig("precon_compare.svg")
-plt.close()
-
-
-
-eigA = la.eigvals(A.toarray())
-plt.scatter(np.real(eigA),np.imag(eigA))
-plt.savefig("eigA.svg")
-plt.close()
-
-eigBA = la.eigvals(luAb.solve(A.toarray()))
-plt.scatter(np.real(eigBA),np.imag(eigBA))
-plt.savefig("eigBA.svg")
-#plt.close()
-
-eigBLRA = la.eigvals(blr_precon_full(A.toarray()))
-plt.scatter(np.real(eigBLRA),np.imag(eigBLRA))
-plt.savefig("eigBLRA.svg")
-plt.legend(["block jacobi","BLR"])
-plt.close()
-
-
-
-
-

@@ -1,7 +1,7 @@
 import numpy as np
+import scipy.linalg as la
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-import scipy.linalg as la
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -9,27 +9,41 @@ import time
 import pickle
 
 
-import jax
 from jax.experimental import sparse
 from jax import random
-import jax.numpy as jnp
 import jax.nn as jnn
+import jax
 from jax import grad, jit, vmap
-from jax.lax import fori_loop
+import jax.numpy as jnp
 from functools import partial
 import optax
-from jax.config import config
-config.update("jax_enable_x64", True)
 
 @jit
 def update(params,updates,step):
     return [(p0+step*u0,p1+step*u1) for (p0,p1),(u0,u1) in zip(params,updates)]
 
+def arnoldi(A,v,k):
+    norm=np.linalg.norm
+    dot=np.dot
+    m,_=A.shape
+    V=np.zeros((m,k+1))
+    H=np.zeros((k+1,k))
+    V[:,0]=v/norm(v)
+    for j in range(0,k):
+        w=A@V[:,j]
+        for i in range(0,j+1):
+            H[i,j]=dot(w,V[:,i])
+            w=w-H[i,j]*V[:,i]
+        H[j+1,j]=norm(w)
+        V[:,j+1]=w/H[j+1,j]
+    return H,V
+
+
 #Make a random sparse-banded matrix 
-#with bands in `bands1/
+#with bands in `bands1
 #its diagonal shifted by `diag`
 def make_banded_matrix(m,diag,bands,rng):
-    subdiags=[rng.uniform(-1,1,m) for _ in bands] + [rng.uniform(-1,1,m) + diag] + [rng.uniform(-1,1,m) for _ in bands]
+    subdiags=[rng.uniform(-1,1,m) for _ in bands] + [rng.uniform(0.1,1,m) + diag] + [rng.uniform(-1,1,m) for _ in bands]
     offs = [-x for x in bands] + [0] + [x for x in bands]
     return sp.diags(subdiags,offs,shape=(m,m))
 
@@ -112,17 +126,11 @@ def eval_blr(blocks,m,blocksize,x):
             ((0,), (0,))
             ))
         UVx = jax.lax.dot_general(Us[i],Vx,dimension_numbers=(
-            ((0,), (0,)),
-            ((2), (1))
+            ((0,2,), (0,1)),
+            ((), ())
             ))
         out.append(UVx)
-
     y=jnp.asarray(out).reshape((nblocks,blocksize,ncols))
-    #Ds.shape = (16, 32, 32)
-    #y.shape = (16, 32, 8)
-
-    #print(Ds.shape)
-    #print(y.shape)
     z=y+jax.lax.dot_general(Ds,xr,dimension_numbers=(
             ((2,), (1,)),
             ((0,), (0,))
@@ -133,110 +141,102 @@ def eval_blr(blocks,m,blocksize,x):
 
 
 @partial(jit, static_argnums=[1,2])
-def loss(params,m,blocksize,Ax,x):
-    blrx=eval_blr(params,m,blocksize,Ax)
-    sqrtm=jnp.sqrt(m)
-    return jnp.sum(((blrx-Ax)/sqrtm)*((blrx-Ax)/sqrtm))
+def loss(params,m,blocksize,A,b):
+    r=b
+    z=eval_blr(params,m,blocksize,r)
+    Az = A@z
+    tau = jnp.dot(r.flatten(),Az.flatten()) / jnp.dot(Az.flatten(),Az.flatten())
+    nr = r - tau*Az
+    return jnp.dot(nr.flatten(),nr.flatten())
 
 
 
 
-f=open("blr.dat","rb")
-blr=pickle.load(f)
-print(blr[0].dtype)
 
 
-f=open("A.dat","rb")
-A=pickle.load(f)
-m,_=A.shape
-blocksize=m//blr[0].shape[0]
+seed=23498732
+rng=np.random.default_rng(seed)
+m=512
+diag=2.0
+blocksize=256
+batchsize=16
+nepochs=4000
+inner=2
+lr=1e-3
+d=1
+#opt = optax.adam(lr)
+opt = optax.sgd(lr)
+
+
+
+
+A=make_banded_matrix(m,diag,[1,2,3,10,40,100],rng)
+Aj = sparse.BCOO.from_scipy_sparse(A)
 Ab=make_block_precon(A,blocksize)
 luAb=spla.splu(sp.csc_matrix(Ab))
-b=np.ones(m)
+b=np.ones((m,3))
+#Ab=A@b
+#blr=make_blr_random(A,blocksize,d=d)
+blr=make_blr(A,blocksize,d=d)
+
+
+#open from checkpoint
+#f=open("blr.dat","rb")
+#blr=pickle.load(f)
+
+
+r=range(0,m,blocksize)
+
+losses=[]
+valids=[]
+opt_state = opt.init(blr)
+
+print(luAb.solve(b))
+print(eval_blr(blr,m,blocksize,b))
+
+
+for it in range(nepochs):
+    print("NEW SUBITERATIONS")
+    #x=rng.normal(size=(m,batchsize))
+    x=rng.uniform(size=m)
+    H,x=arnoldi(A,x,batchsize)
+
+    for i in range(0,inner):
+        start=time.time()
+        err=loss(blr,m,blocksize,Aj,x)
+        g = grad(loss)(blr,m,blocksize,Aj,x)
+        updates,opt_state = opt.update(g,opt_state)
+        blr = optax.apply_updates(blr,updates)
+        stop=time.time()
+
+        valid_err = loss(blr,m,blocksize,Aj,np.ones(m).reshape((m,1)))
+
+        if i==0:
+            losses.append(err)
+            valids.append(valid_err)
+        print(f"it = {it},     elapsed = {stop-start : .4f},    loss = {err : 4f},      valid = {valid_err}")
+#    if len(losses)>5000:
+#        inner=20
 
 
 
-errs=[]
-it=0
-def callback(xk):
-    global it
-    err=np.linalg.norm(b-A@xk)
-    print(f"it = {it}, res = {err}")
-    errs.append(err)
+plt.semilogy(losses)
+plt.title("Loss at start of new epoch")
+plt.xlabel("epochs")
+plt.ylabel("loss")
+plt.savefig("loss.svg")
+plt.close()
 
-    it=it+1
-
-Afull=A.toarray()
-Iblr=eval_blr(blr,m,blocksize,Afull)
-Ib=luAb.solve(Afull)
-print(f"norm(Iblr-I) = {np.linalg.norm(Iblr.flatten()-np.eye(m).flatten())}")
-print(f"norm(Ib-I) = {np.linalg.norm(Ib.flatten()-np.eye(m).flatten())}")
-
-
-seed=23084
-rng=np.random.default_rng(seed)
-restart=1
-maxiter=50
-print("STANDARD BLOCK JACOBI")
-spla.gmres(A,b,callback=callback,restart=restart,M=spla.LinearOperator((m,m),matvec=luAb.solve),maxiter=maxiter,callback_type="x")
-
-plt.semilogy(errs,linewidth=2)
-plt.xlabel("GMRES Iteration")
-plt.ylabel("Residual")
-it=0
-errs=[]
-
-
-def blr_precon(x):
-    x=x.reshape((m,1))
-    x=eval_blr(blr,m,blocksize,x)
-    return x.reshape((m,))
-
-def blr_precon_full(x):
-    x=eval_blr(blr,m,blocksize,x)
-    return x
-
-
-
-
-x0=rng.uniform(-1,1,size=m)
-x1=rng.uniform(-1,1,size=m)
-alpha=0.2
-beta=-0.1
-
-print("LINEARITY TEST")
-print(np.linalg.norm(blr_precon(alpha*x0 + beta*x1) - alpha*blr_precon(x0) - beta*blr_precon(x1)))
-
-
-
-print("LEARNED BLR PRECONDITIONER")
-spla.gmres(A,b,callback=callback,restart=restart,M=spla.LinearOperator((m,m),matvec=blr_precon),maxiter=maxiter,callback_type="x")
-
-plt.semilogy(errs,linewidth=2)
-plt.legend(["Block Jacobi","Learned BLR"])
-plt.title("Comparing Block Jacobi to Block-Low-Rank with same block size")
-plt.savefig("precon_compare.svg")
+plt.semilogy(losses)
+plt.title("Validation loss at start of new epoch")
+plt.xlabel("epochs")
+plt.ylabel("validation loss")
+plt.savefig("valid.svg")
 plt.close()
 
 
-
-eigA = la.eigvals(A.toarray())
-plt.scatter(np.real(eigA),np.imag(eigA))
-plt.savefig("eigA.svg")
-plt.close()
-
-eigBA = la.eigvals(luAb.solve(A.toarray()))
-plt.scatter(np.real(eigBA),np.imag(eigBA))
-plt.savefig("eigBA.svg")
-#plt.close()
-
-eigBLRA = la.eigvals(blr_precon_full(A.toarray()))
-plt.scatter(np.real(eigBLRA),np.imag(eigBLRA))
-plt.savefig("eigBLRA.svg")
-plt.legend(["block jacobi","BLR"])
-plt.close()
-
-
-
-
+f=open("blr.dat","wb")
+pickle.dump(blr,f)
+f=open("A.dat","wb")
+pickle.dump(A,f)
 
